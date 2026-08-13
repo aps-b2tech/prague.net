@@ -170,7 +170,7 @@ internal class KafkaCacheHandler<TCacheEntity, TKey, TVlaue> : KafkaCacheHandler
 			if (decision != FilterDecision.Accept) {
 				if (isLoading) {
 					if (decision == FilterDecision.Delete)
-						RemoveDuringLoad(key, raw.Timestamp.UnixTimestampMs, offset);
+						RemoveDuringLoad(key, raw.Timestamp.UnixTimestampMs);
 				} else if (decision == FilterDecision.Delete) {
 					PublishRaw(RAW_KIND_DELETE, key, null, raw.Timestamp.UnixTimestampMs);
 				} else {
@@ -187,7 +187,7 @@ internal class KafkaCacheHandler<TCacheEntity, TKey, TVlaue> : KafkaCacheHandler
 		if (isLoading) {
 			// Empty value span == tombstone — cancel any pending buffered value and drop any already-flushed one.
 			if (valueSpan.IsEmpty) {
-				RemoveDuringLoad(key, timestamp.UnixTimestampMs, offset);
+				RemoveDuringLoad(key, timestamp.UnixTimestampMs);
 				return;
 			}
 
@@ -209,7 +209,7 @@ internal class KafkaCacheHandler<TCacheEntity, TKey, TVlaue> : KafkaCacheHandler
 				}
 				if (decision != FilterDecision.Accept) {
 					if (decision == FilterDecision.Delete)
-						RemoveDuringLoad(key, timestamp.UnixTimestampMs, offset);
+						RemoveDuringLoad(key, timestamp.UnixTimestampMs);
 					return;
 				}
 			}
@@ -278,13 +278,9 @@ internal class KafkaCacheHandler<TCacheEntity, TKey, TVlaue> : KafkaCacheHandler
 	/// <summary>
 	///   Load-phase delete: cancel any buffered value for the key and remove an already-flushed one from the cache.
 	/// </summary>
-	private void RemoveDuringLoad(TKey key, long timestampMs, long offset) {
+	private void RemoveDuringLoad(TKey key, long timestampMs) {
 		_rawLoadBuffer?.Remove(key);
-		try {
-			_cache.Remove(key, timestampMs, out _);
-		} catch (Exception e) {
-			_logger.ErrorProcessingMessageDuringLoad(e, Name, offset);
-		}
+		_cache.Remove(key, timestampMs, out _);
 	}
 
 	private void FlushRawLoadBufferToCache() {
