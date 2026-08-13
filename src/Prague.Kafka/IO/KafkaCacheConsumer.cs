@@ -13,6 +13,8 @@ using SerDe;
 using Utils;
 
 internal abstract class KafkaCacheHandler {
+	internal const int COMPACTING_BUFFER_CAPACITY = 50;
+
 	public readonly KafkaHeaderFilters HeadersFilters;
 
 	public KafkaCacheHandler(KafkaHeaderFilters headersFilters) {
@@ -104,8 +106,6 @@ internal class KafkaCacheHandler<TCacheEntity, TKey, TVlaue> : KafkaCacheHandler
 	where TVlaue : class, IDataCacheItem<TKey, TVlaue>, IEnrichable<TVlaue>, ICacheEquatable<TVlaue>, IPragueMetadataSettable,
 	ICacheClonable<TVlaue>
 	where TCacheEntity : IDataCache<TKey, TVlaue> {
-	private const int COMPACTING_BUFFER_CAPACITY = 50;
-
 	private readonly ICacheAfterHandler<TKey, TVlaue>[] _afterHandlers;
 	private readonly TCacheEntity _cache;
 	private readonly Enricher<TVlaue> _enricher;
@@ -170,7 +170,7 @@ internal class KafkaCacheHandler<TCacheEntity, TKey, TVlaue> : KafkaCacheHandler
 			if (decision != FilterDecision.Accept) {
 				if (isLoading) {
 					if (decision == FilterDecision.Delete)
-						_rawLoadBuffer?.Remove(key);
+						RemoveDuringLoad(key, raw.Timestamp.UnixTimestampMs, offset);
 				} else if (decision == FilterDecision.Delete) {
 					PublishRaw(RAW_KIND_DELETE, key, null, raw.Timestamp.UnixTimestampMs);
 				} else {
@@ -185,9 +185,9 @@ internal class KafkaCacheHandler<TCacheEntity, TKey, TVlaue> : KafkaCacheHandler
 		var valueSpan = raw.Value;
 
 		if (isLoading) {
-			// Empty value span == tombstone — cancel any pending buffered value for this key.
+			// Empty value span == tombstone — cancel any pending buffered value and drop any already-flushed one.
 			if (valueSpan.IsEmpty) {
-				_rawLoadBuffer?.Remove(key);
+				RemoveDuringLoad(key, timestamp.UnixTimestampMs, offset);
 				return;
 			}
 
@@ -209,7 +209,7 @@ internal class KafkaCacheHandler<TCacheEntity, TKey, TVlaue> : KafkaCacheHandler
 				}
 				if (decision != FilterDecision.Accept) {
 					if (decision == FilterDecision.Delete)
-						_rawLoadBuffer?.Remove(key);
+						RemoveDuringLoad(key, timestamp.UnixTimestampMs, offset);
 					return;
 				}
 			}
@@ -273,6 +273,18 @@ internal class KafkaCacheHandler<TCacheEntity, TKey, TVlaue> : KafkaCacheHandler
 		slot.Key = key;
 		slot.Value = value;
 		slot.TimestampMs = timestampMs;
+	}
+
+	/// <summary>
+	///   Load-phase delete: cancel any buffered value for the key and remove an already-flushed one from the cache.
+	/// </summary>
+	private void RemoveDuringLoad(TKey key, long timestampMs, long offset) {
+		_rawLoadBuffer?.Remove(key);
+		try {
+			_cache.Remove(key, timestampMs, out _);
+		} catch (Exception e) {
+			_logger.ErrorProcessingMessageDuringLoad(e, Name, offset);
+		}
 	}
 
 	private void FlushRawLoadBufferToCache() {

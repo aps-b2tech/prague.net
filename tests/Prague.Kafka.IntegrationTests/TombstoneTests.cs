@@ -6,6 +6,7 @@ using MessagePack;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Prague.Kafka.IO;
 
 [TestFixture]
 public class TombstoneTests {
@@ -82,6 +83,46 @@ public class TombstoneTests {
 		Assert.That(cache.Cache.TryGet(1, out _), Is.False, "Value then tombstone during load -> absent");
 
 		await hosted.StopAsync(CancellationToken.None);
+	}
+
+	[Test]
+	public async Task TombstoneAfterBufferFlushDuringInitialLoad_LeavesKeyAbsent() {
+		var lastSpacer = 100 + KafkaCacheHandler.COMPACTING_BUFFER_CAPACITY;
+		using (var seeder = DualKafkaClusterFixture.NewProducer(DualKafkaClusterFixture.BootstrapServersA)) {
+			Produce(seeder, 1, "present");
+
+			// Enough values for other keys to cross a compacting-buffer flush, so key 1 is already in the cache.
+			for (var i = 100; i <= lastSpacer; i++)
+				Produce(seeder, i, $"spacer-{i}");
+
+			seeder.Produce(_topic, new Message<byte[], byte[]> {
+				Key = MessagePackSerializer.Serialize(1),
+				Value = null!,
+				Headers = new Headers()
+			});
+			seeder.Flush(TimeSpan.FromSeconds(10));
+		}
+
+		var sp = BuildServices().BuildServiceProvider();
+		var hosted = sp.GetRequiredService<IHostedService>();
+		using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+		await hosted.StartAsync(cts.Token);
+		var loader = sp.GetRequiredService<KafkaCachesLoader>();
+		await loader.StartAsync(cts.Token);
+
+		var cache = sp.GetRequiredService<FilterEntityCache>();
+		Assert.That(cache.Cache.TryGet(lastSpacer, out _), Is.True, "Spacer keys must be loaded");
+		Assert.That(cache.Cache.TryGet(1, out _), Is.False, "Tombstone after a buffer flush during load -> absent");
+
+		await hosted.StopAsync(CancellationToken.None);
+	}
+
+	private void Produce(IProducer<byte[], byte[]> producer, int id, string name) {
+		producer.Produce(_topic, new Message<byte[], byte[]> {
+			Key = MessagePackSerializer.Serialize(id),
+			Value = MessagePackSerializer.Serialize(new FilterEntity { Id = id, Name = name, Value = id }),
+			Headers = new Headers()
+		});
 	}
 
 	private ServiceCollection BuildServices() {
