@@ -7,6 +7,7 @@ using MessagePack;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Prague.Kafka.IO;
 
 [TestFixture]
 public class ValueFilterTests {
@@ -127,6 +128,29 @@ public class ValueFilterTests {
 		await Task.Delay(1000);
 		Assert.That(cache.Cache.TryGet(3, out var present), Is.True);
 		Assert.That(present!.Name, Is.EqualTo("active"));
+
+		await StopAsync(sp);
+	}
+
+	[Test]
+	public async Task WithValueFilter_TreatAsDelete_AfterBufferFlush_RemovesKey_DuringInitialLoad() {
+		var lastSpacer = 100 + KafkaCacheHandler.COMPACTING_BUFFER_CAPACITY;
+		using (var seeder = DualKafkaClusterFixture.NewProducer(DualKafkaClusterFixture.BootstrapServersA)) {
+			Produce(seeder, 1, "active", 1);
+
+			// Enough values for other keys to cross a compacting-buffer flush, so key 1 is already in the cache.
+			for (var i = 100; i <= lastSpacer; i++)
+				Produce(seeder, i, $"spacer-{i}", i);
+
+			Produce(seeder, 1, "deleted-1", 1);
+			seeder.Flush(TimeSpan.FromSeconds(10));
+		}
+
+		var (sp, cache) = await StartAsync(
+			b => b.WithValueFilter(v => !v.Name.StartsWith("deleted"), treatAsDelete: true));
+
+		Assert.That(cache.Cache.TryGet(lastSpacer, out _), Is.True, "Spacer keys must be loaded");
+		Assert.That(cache.Cache.TryGet(1, out _), Is.False, "Value-filter delete after a buffer flush during load -> absent");
 
 		await StopAsync(sp);
 	}

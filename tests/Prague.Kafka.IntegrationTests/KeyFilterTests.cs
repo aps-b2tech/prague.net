@@ -7,6 +7,7 @@ using MessagePack;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Prague.Kafka.IO;
 
 [TestFixture]
 public class KeyFilterTests {
@@ -133,6 +134,33 @@ public class KeyFilterTests {
 		await Task.Delay(1000);
 		Assert.That(cache.Cache.TryGet(3, out var present), Is.True);
 		Assert.That(present!.Name, Is.EqualTo("present"));
+
+		await StopAsync(sp);
+	}
+
+	[Test]
+	public async Task WithKeyFilter_TreatAsDelete_AfterBufferFlush_RemovesKey_DuringInitialLoad() {
+		var lastSpacer = 100 + KafkaCacheHandler.COMPACTING_BUFFER_CAPACITY;
+		using (var seeder = DualKafkaClusterFixture.NewProducer(DualKafkaClusterFixture.BootstrapServersA)) {
+			Produce(seeder, 1, "present");
+
+			// Enough values for other keys to cross a compacting-buffer flush, so key 1 is already in the cache.
+			for (var i = 100; i <= lastSpacer; i++)
+				Produce(seeder, i, $"spacer-{i}");
+
+			Produce(seeder, 1, "now-rejected");
+			seeder.Flush(TimeSpan.FromSeconds(10));
+		}
+
+		// Key 1 is admitted on its first message and offboarded before its second one.
+		var seenKeyOne = 0;
+		var (sp, cache) = await StartAsync(
+			b => b.WithKeyFilter(k => k != 1 || Interlocked.Increment(ref seenKeyOne) == 1, treatAsDelete: true));
+
+		// Guards the predicate above: a re-read would admit/reject the wrong message and make the test vacuous.
+		Assert.That(seenKeyOne, Is.EqualTo(2), "Key 1 must be filtered exactly twice");
+		Assert.That(cache.Cache.TryGet(lastSpacer, out _), Is.True, "Spacer keys must be loaded");
+		Assert.That(cache.Cache.TryGet(1, out _), Is.False, "Key-filter delete after a buffer flush during load -> absent");
 
 		await StopAsync(sp);
 	}
